@@ -163,6 +163,12 @@ type ImageServer interface {
 	// CandidatesForPotentiallyShortImageName resolves an image name into a set of fully-qualified image names (domain/repo/image:tag|@digest).
 	// It will only return an empty slice if err != nil.
 	CandidatesForPotentiallyShortImageName(systemContext *types.SystemContext, imageName string) ([]RegistryImageReference, error)
+	// FindLocallyStoredImageMatchingName looks for an image already present in
+	// local storage whose recorded name(s) normalize to the same reference as
+	// imageName, independent of the current registries.conf
+	// unqualified-search-registries configuration. See its doc comment for
+	// why this fallback exists. Returns (nil, nil) if no local image matches.
+	FindLocallyStoredImageMatchingName(imageName string) (*StorageImageID, error)
 
 	// UpdatePinnedImagesList updates pinned and pause images list in imageService.
 	UpdatePinnedImagesList(imageList []string)
@@ -997,6 +1003,67 @@ func (svc *imageService) CandidatesForPotentiallyShortImageName(systemContext *t
 	}
 
 	return images, nil
+}
+
+// FindLocallyStoredImageMatchingName looks for an image already present in
+// local storage whose recorded name(s) normalize to the same reference as
+// imageName, WITHOUT relying on the current registries.conf
+// unqualified-search-registries configuration the way
+// CandidatesForPotentiallyShortImageName does.
+//
+// Why this exists: CandidatesForPotentiallyShortImageName generates
+// candidate fully-qualified names purely from configuration (short-name
+// aliases + unqualified-search-registries) — exactly right for deciding
+// where to PULL an unqualified name FROM, but not guaranteed to reproduce
+// the name an already-present image happens to be tagged under. An image
+// can end up tagged under a name outside the CURRENT candidate set — e.g.
+// it was pulled/tagged before a registries.conf change, or via a path
+// other than the normal short-name pull flow (a direct `crictl pull
+// <fully-qualified-name>`, or an image loaded/imported out of band).
+//
+// Without a fallback like this, ImageStatus/RemoveImage report "not found"
+// for an image ListImages ("crictl images") plainly shows as present in
+// the same store — a real, observed symptom whose only prior workaround was
+// manually removing and re-pulling the image so it gets re-tagged under a
+// name the current candidate list happens to match. This function closes
+// that gap by checking local storage directly, as a last resort AFTER the
+// registry-driven candidate list has already been exhausted with no match
+// — it changes nothing about the fast path where candidates do match.
+//
+// Returns (nil, nil) if no local image matches, or if imageName doesn't
+// even parse as a reference — neither case is an error, matching the
+// (nil, nil)-on-not-found contract already used throughout this file.
+func (svc *imageService) FindLocallyStoredImageMatchingName(imageName string) (*StorageImageID, error) {
+	target, err := reference.ParseNormalizedNamed(imageName)
+	if err != nil {
+		return nil, nil //nolint:nilerr // an unparseable input can't match anything locally; the caller's existing error paths already handle that input
+	}
+
+	target = reference.TagNameOnly(target)
+	targetStr := target.String()
+
+	images, err := svc.store.Images()
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range images {
+		for _, nameString := range images[i].Names {
+			candidate, err := reference.ParseNormalizedNamed(nameString)
+			if err != nil {
+				continue // an already-stored name that no longer parses cleanly can't match; skip it rather than fail the whole lookup
+			}
+
+			candidate = reference.TagNameOnly(candidate)
+			if candidate.String() == targetStr {
+				id := storageImageIDFromImage(&images[i])
+
+				return &id, nil
+			}
+		}
+	}
+
+	return nil, nil
 }
 
 // GetImageService returns an ImageServer that uses the passed-in store, and

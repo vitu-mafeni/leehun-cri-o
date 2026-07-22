@@ -4,7 +4,13 @@
 # This script is invoked by CRIU during the restore lifecycle via the
 # --action-script option. It reads device-mapping.json from the CRIU image
 # directory and bind-mounts each host device into the restored container's
-# mount namespace.
+# mount namespace. It then reads gpu-remap.json (when present) and verifies
+# the device it just bound actually matches the GPU the restore target was
+# supposed to get, writing a gpu-remap-status marker file that CRIU's CUDA
+# plugin guard hook (plugins/cuda/cuda_plugin.c,
+# cuda_plugin_verify_gpu_capacity) waits on before calling
+# `cuda-checkpoint --action restore` — see
+# docs/requirements/checkpoint-restore-gpu-decoupling-design.md §3.2-3.3.
 #
 # CRIU environment variables used:
 #   CRTOOLS_SCRIPT_ACTION - The current CRIU lifecycle phase (e.g., "post-restore")
@@ -18,6 +24,11 @@
 #   type           - Device type ("c" for char, "b" for block)
 #   major          - Device major number
 #   minor          - Device minor number
+#
+# gpu-remap.json (also written by CRI-O, optional — absent for a checkpoint
+# that predates GPU Capability Descriptor capture, or one with no GPU
+# allocation) contains: old_uuid, new_uuid, old_vram_mb, new_vram_mb,
+# old_cores, new_cores, resolver.
 #
 # Installation: /usr/libexec/crio/criu-device-restorer.sh (must be executable)
 
@@ -121,4 +132,54 @@ if [[ "${FAIL_COUNT}" -gt 0 ]]; then
 fi
 
 log_info "Device remount completed successfully"
+
+# ── GPU remap verification ──────────────────────────────────────────────
+# gpu-remap.json is written by CRI-O (internal/lib/gpu_capability.go,
+# writeGPURemapFiles) only when the checkpoint carried a GPU Capability
+# Descriptor. When present, verify the GPU identity the restore target was
+# actually resolved against (new_uuid) is really present on this host
+# before letting CRIU proceed to cuda-checkpoint --action restore — the
+# device bind-mount loop above already put the right node into the
+# container, but this is the identity cross-check the CRIU CUDA plugin's
+# guard hook depends on via STATUS_FILE.
+REMAP_FILE="${CRTOOLS_IMAGE_DIR}/gpu-remap.json"
+STATUS_FILE="${CRTOOLS_IMAGE_DIR}/gpu-remap-status"
+
+if [[ -f "${REMAP_FILE}" ]]; then
+    NEW_UUID=""
+    if command -v jq &>/dev/null; then
+        NEW_UUID=$(jq -r '.new_uuid // ""' "${REMAP_FILE}")
+    elif command -v python3 &>/dev/null; then
+        NEW_UUID=$(python3 -c "
+import json, sys
+print(json.load(open(sys.argv[1])).get('new_uuid', ''))
+" "${REMAP_FILE}")
+    else
+        log_error "Neither jq nor python3 found, cannot parse gpu-remap.json"
+        echo "failed: no JSON parser available" > "${STATUS_FILE}"
+        exit 1
+    fi
+
+    if [[ -z "${NEW_UUID}" ]]; then
+        log_warn "gpu-remap.json present but new_uuid is empty, cannot verify device identity"
+        echo "failed: new_uuid missing from gpu-remap.json" > "${STATUS_FILE}"
+        exit 1
+    fi
+
+    if ! command -v nvidia-smi &>/dev/null; then
+        log_error "nvidia-smi not found, cannot verify GPU identity ${NEW_UUID}"
+        echo "failed: nvidia-smi unavailable" > "${STATUS_FILE}"
+        exit 1
+    fi
+
+    if nvidia-smi --query-gpu=uuid --format=csv,noheader -i "${NEW_UUID}" &>/dev/null; then
+        log_info "Verified restore target GPU ${NEW_UUID} is present on this host"
+        echo "ok" > "${STATUS_FILE}"
+    else
+        log_error "Restore target GPU ${NEW_UUID} (from gpu-remap.json) not found via nvidia-smi on this host"
+        echo "failed: uuid ${NEW_UUID} not found" > "${STATUS_FILE}"
+        exit 1
+    fi
+fi
+
 exit 0

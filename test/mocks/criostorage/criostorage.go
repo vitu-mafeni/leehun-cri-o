@@ -72,6 +72,21 @@ func (mr *MockImageServerMockRecorder) DeleteImage(systemContext, id any) *gomoc
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteImage", reflect.TypeOf((*MockImageServer)(nil).DeleteImage), systemContext, id)
 }
 
+// FindLocallyStoredImageMatchingName mocks base method.
+func (m *MockImageServer) FindLocallyStoredImageMatchingName(imageName string) (*storage.StorageImageID, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FindLocallyStoredImageMatchingName", imageName)
+	ret0, _ := ret[0].(*storage.StorageImageID)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// FindLocallyStoredImageMatchingName indicates an expected call of FindLocallyStoredImageMatchingName.
+func (mr *MockImageServerMockRecorder) FindLocallyStoredImageMatchingName(imageName any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindLocallyStoredImageMatchingName", reflect.TypeOf((*MockImageServer)(nil).FindLocallyStoredImageMatchingName), imageName)
+}
+
 // GetStore mocks base method.
 func (m *MockImageServer) GetStore() storage0.Store {
 	m.ctrl.T.Helper()

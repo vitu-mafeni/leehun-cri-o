@@ -95,6 +95,27 @@ func (s *Server) removeImage(ctx context.Context, imageRef string) (untagErr err
 		break
 	}
 
+	// None of the registries.conf-driven candidates matched an image to
+	// untag, but the image may still be present in local storage under a
+	// name outside that candidate set — see
+	// FindLocallyStoredImageMatchingName's doc comment. Delete by ID
+	// directly (mirroring the ID-prefix branch above) rather than via
+	// UntagImage, since the fallback resolved an ID, not a candidate name.
+	if !deleted {
+		if id, ferr := s.ContainerServer.StorageImageServer().FindLocallyStoredImageMatchingName(imageRef); ferr == nil && id != nil {
+			if err := s.volumeInUse(id.IDStringForOutOfProcessConsumptionOnly()); err != nil {
+				return err
+			}
+
+			if err := s.ContainerServer.StorageImageServer().DeleteImage(s.config.SystemContext, *id); err != nil && !errors.Is(err, storagetypes.ErrImageUnknown) {
+				return fmt.Errorf("delete image: %w", err)
+			}
+
+			deleted = true
+			untagErr = nil
+		}
+	}
+
 	if !deleted && untagErr != nil {
 		return untagErr
 	}

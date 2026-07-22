@@ -146,6 +146,22 @@ func (s *Server) storageImageStatus(ctx context.Context, spec *types.ImageSpec) 
 	if lastErr != nil {
 		return nil, lastErr
 	}
+
+	// None of the registries.conf-driven candidates matched, but the image
+	// may still be present in local storage under a name outside that
+	// candidate set — see FindLocallyStoredImageMatchingName's doc comment
+	// for why this gap exists and what it fixes (kubelet reporting an
+	// image as not-found when `crictl images`/ListImages plainly shows it
+	// present in the same store).
+	if id, ferr := s.ContainerServer.StorageImageServer().FindLocallyStoredImageMatchingName(spec.GetImage()); ferr == nil && id != nil {
+		status, err := s.ContainerServer.StorageImageServer().ImageStatusByID(s.config.SystemContext, *id)
+		if err == nil {
+			return status, nil
+		}
+
+		log.Warnf(ctx, "Found local image match for %s by name fallback, but ImageStatusByID failed: %v", spec.GetImage(), err)
+	}
+
 	// CandidatesForPotentiallyShortImageName returns at least one value if it doesn't fail.
 	// So, if we got here, there was at least one ErrNoSuchImage, and no other errors.
 	log.Infof(ctx, "Image %s not found", spec.GetImage())

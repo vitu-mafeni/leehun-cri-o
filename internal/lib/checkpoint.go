@@ -90,6 +90,15 @@ func (c *ContainerServer) ContainerCheckpoint(
 		if err := c.prepareCheckpointExport(ctr); err != nil {
 			return "", fmt.Errorf("failed to write config dumps for container %s: %w", ctr.ID(), err)
 		}
+
+		// Capture the GPU Capability Descriptor (vGPU allocation size, live
+		// device characteristics) at the moment of freeze, so a later restore
+		// can validate a candidate GPU allocation against it before ever
+		// invoking CRIU. Best-effort: a capture failure must not block the
+		// checkpoint itself (see writeGPUCapabilityMetadata's doc comment).
+		if _, err := c.writeGPUCapabilityMetadata(ctx, ctr, &specgen); err != nil {
+			log.Warnf(ctx, "GPU capability metadata not captured for container %s: %v", ctr.ID(), err)
+		}
 	}
 
 	if err := c.runtime.CheckpointContainer(ctx, ctr, specgen.Config, opts.KeepRunning); err != nil {
@@ -126,6 +135,7 @@ func (c *ContainerServer) ContainerCheckpoint(
 			stats.StatsDump,
 			metadata.ConfigDumpFile,
 			metadata.SpecDumpFile,
+			gpuCapabilityFile,
 		}
 		for _, del := range cleanup {
 			file := filepath.Join(ctr.Dir(), del)
@@ -310,6 +320,15 @@ func (c *ContainerServer) exportCheckpoint(ctx context.Context, ctr *oci.Contain
 		metadata.ConfigDumpFile,
 		metadata.SpecDumpFile,
 		"bind.mounts",
+	}
+
+	// gpuCapabilityFile is only present when writeGPUCapabilityMetadata
+	// actually captured a GPU allocation for this container (checkpoint.go's
+	// ContainerCheckpoint); a CPU-only container or a resolver-query failure
+	// leaves it absent, and it must simply be omitted from the archive
+	// rather than treated as an export error.
+	if _, err := os.Stat(filepath.Join(dest, gpuCapabilityFile)); err == nil {
+		includeFiles = append(includeFiles, gpuCapabilityFile)
 	}
 
 	// To correctly track deleted files, let's go through the output of 'podman diff'
