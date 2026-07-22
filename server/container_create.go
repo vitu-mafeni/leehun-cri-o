@@ -29,6 +29,7 @@ import (
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 	kubeletTypes "k8s.io/kubelet/pkg/types"
 
+	internalann "github.com/cri-o/cri-o/internal/annotations"
 	"github.com/cri-o/cri-o/internal/config/node"
 	"github.com/cri-o/cri-o/internal/config/rdt"
 	"github.com/cri-o/cri-o/internal/factory/container"
@@ -40,7 +41,6 @@ import (
 	"github.com/cri-o/cri-o/internal/storage"
 	"github.com/cri-o/cri-o/internal/storage/references"
 	v2 "github.com/cri-o/cri-o/pkg/annotations/v2"
-	internalann "github.com/cri-o/cri-o/internal/annotations"
 	"github.com/cri-o/cri-o/pkg/config"
 	"github.com/cri-o/cri-o/utils"
 )
@@ -1356,6 +1356,21 @@ func (s *Server) resolveAndVerifyContainerImage(ctx context.Context, ctr contain
 			imgResult, imgResultErr = s.ContainerServer.StorageImageServer().ImageStatusByName(s.config.SystemContext, name)
 			if imgResultErr == nil {
 				break
+			}
+		}
+
+		if imgResultErr != nil {
+			// None of the registries.conf-driven candidates matched, but the
+			// image may still be present in local storage under a name
+			// outside that candidate set — see
+			// FindLocallyStoredImageMatchingName's doc comment
+			// (internal/storage/image.go). Without this fallback,
+			// CreateContainer can fail to resolve an image that
+			// ImageStatus/PullImage just reported as present moments
+			// earlier — a real, observed production symptom (a pod stuck
+			// failing container creation right after a successful pull).
+			if id, ferr := s.ContainerServer.StorageImageServer().FindLocallyStoredImageMatchingName(userRequestedImage); ferr == nil && id != nil {
+				imgResult, imgResultErr = s.ContainerServer.StorageImageServer().ImageStatusByID(s.config.SystemContext, *id)
 			}
 		}
 

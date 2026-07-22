@@ -871,6 +871,28 @@ func pullImageImplementation(ctx context.Context, lookup *imageLookupService, st
 		ProgressInterval: options.ProgressInterval,
 		Progress:         options.Progress,
 	})
+	if err == nil {
+		// Re-read the manifest from what was ACTUALLY committed to destRef
+		// (by name — destRef was built from imageName.Raw(), the tag we
+		// just committed under) rather than trusting copy.Image()'s
+		// returned bytes as-is: the two are not guaranteed to be
+		// byte-identical for every source (e.g. a multi-arch manifest list
+		// can end up normalized/converted differently between "what
+		// copy.Image() returned" and "what Commit() actually wrote as
+		// retrievable BigData"). Handing back a digest computed from bytes
+		// that don't match what's indexed in storage produces a real,
+		// observed production symptom: CreateContainer/ImageStatus later
+		// fail with "does not resolve to an image ID" / "image not known"
+		// for an image that was JUST reported as successfully pulled.
+		// Best-effort only — any failure here just falls back to the
+		// original copy.Image() bytes, never worse than today's behavior.
+		if committedImg, imgErr := destRef.NewImage(ctx, options.DestinationCtx); imgErr == nil {
+			if committedManifestBytes, _, mErr := committedImg.Manifest(ctx); mErr == nil {
+				manifestBytes = committedManifestBytes
+			}
+			committedImg.Close()
+		}
+	}
 	if err != nil {
 		artifactStore, artifactErr := ociartifact.NewStore(store.GraphRoot(), &srcSystemContext)
 		if artifactErr != nil {
