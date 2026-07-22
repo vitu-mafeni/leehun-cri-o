@@ -169,6 +169,14 @@ type ImageServer interface {
 	// unqualified-search-registries configuration. See its doc comment for
 	// why this fallback exists. Returns (nil, nil) if no local image matches.
 	FindLocallyStoredImageMatchingName(imageName string) (*StorageImageID, error)
+	// FindLocallyStoredImageMatchingDigest treats digestHex as the hex
+	// portion of a sha256 manifest digest (NOT a storage image ID — the two
+	// share the same 64-hex-character shape but are different values by
+	// design) and looks it up directly against the store's digest index,
+	// independent of any name. See its doc comment for why this fallback
+	// exists. Returns (nil, nil) if digestHex isn't a valid digest shape, or
+	// no local image has a matching digest.
+	FindLocallyStoredImageMatchingDigest(digestHex string) (*StorageImageID, error)
 
 	// UpdatePinnedImagesList updates pinned and pause images list in imageService.
 	UpdatePinnedImagesList(imageList []string)
@@ -1086,6 +1094,49 @@ func (svc *imageService) FindLocallyStoredImageMatchingName(imageName string) (*
 	}
 
 	return nil, nil
+}
+
+// FindLocallyStoredImageMatchingDigest treats digestHex as the hex portion of
+// a sha256 manifest digest and looks it up directly against the store's
+// digest index (store.ImagesByDigest), independent of any name.
+//
+// Why this exists: HeuristicallyTryResolvingStringAsIDPrefix accepts ANY
+// well-formed 64-hex-character string as a plausible image ID purely by
+// format — StorageImageID's own doc comment says as much: "An ID might not
+// refer to an image ... if the ID never referred to an image in the first
+// place." A manifest digest's hex portion has the exact same 64-hex-char
+// shape as a real content-addressed image ID, but the two are different
+// values by design (an image ID is derived from the config blob; a digest,
+// from the manifest). Kubernetes' CreateContainer requests commonly carry
+// exactly this shape of string — the bare digest hex, with no name at all
+// — once a container has been resolved once, specifically to pin the exact
+// content across tag mutations. When that hex string happens to be a
+// manifest digest rather than a real image ID, ImageStatusByID/DeleteImage
+// fail with "image not known" even though the image is unambiguously
+// present — and because the input carries no name at all,
+// FindLocallyStoredImageMatchingName cannot help either (there's nothing to
+// match a name against). This is the fallback that actually can, since
+// go.podman.io/storage indexes images by digest independent of any name.
+//
+// Returns (nil, nil) — not an error — if digestHex isn't a valid digest
+// shape, or no local image has a matching digest.
+func (svc *imageService) FindLocallyStoredImageMatchingDigest(digestHex string) (*StorageImageID, error) {
+	dgst, err := digest.Parse("sha256:" + digestHex)
+	if err != nil {
+		return nil, nil //nolint:nilerr // not a valid digest shape; nothing for this fallback to do
+	}
+
+	images, err := svc.store.ImagesByDigest(dgst)
+	if err != nil {
+		return nil, err
+	}
+	if len(images) == 0 {
+		return nil, nil
+	}
+
+	id := storageImageIDFromImage(images[0])
+
+	return &id, nil
 }
 
 // GetImageService returns an ImageServer that uses the passed-in store, and

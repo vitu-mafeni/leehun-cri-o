@@ -97,19 +97,30 @@ func (s *Server) ImageStatus(ctx context.Context, req *types.ImageStatusRequest)
 func (s *Server) storageImageStatus(ctx context.Context, spec *types.ImageSpec) (*pkgstorage.ImageResult, error) {
 	if id := s.ContainerServer.StorageImageServer().HeuristicallyTryResolvingStringAsIDPrefix(spec.GetImage()); id != nil {
 		status, err := s.ContainerServer.StorageImageServer().ImageStatusByID(s.config.SystemContext, *id)
-		if err != nil {
-			if errors.Is(err, istorage.ErrNoSuchImage) || errors.Is(err, storage.ErrImageUnknown) {
-				log.Infof(ctx, "Image %s not found", spec.GetImage())
+		if err == nil {
+			return status, nil
+		}
 
-				return nil, nil
-			}
-
+		if !errors.Is(err, istorage.ErrNoSuchImage) && !errors.Is(err, storage.ErrImageUnknown) {
 			log.Warnf(ctx, "Error getting status from %s: %v", spec.GetImage(), err)
 
 			return nil, err
 		}
 
-		return status, nil
+		// spec.GetImage() matched the FORMAT of a full image ID but no image
+		// actually has that ID — it may really be a manifest digest's hex
+		// portion instead (same shape, different value; see
+		// FindLocallyStoredImageMatchingDigest's doc comment). Try that
+		// before giving up.
+		if digestID, derr := s.ContainerServer.StorageImageServer().FindLocallyStoredImageMatchingDigest(spec.GetImage()); derr == nil && digestID != nil {
+			if status, err := s.ContainerServer.StorageImageServer().ImageStatusByID(s.config.SystemContext, *digestID); err == nil {
+				return status, nil
+			}
+		}
+
+		log.Infof(ctx, "Image %s not found", spec.GetImage())
+
+		return nil, nil
 	}
 
 	potentialMatches, err := s.ContainerServer.StorageImageServer().CandidatesForPotentiallyShortImageName(s.config.SystemContext, spec.GetImage())

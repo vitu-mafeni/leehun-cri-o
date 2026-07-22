@@ -47,6 +47,18 @@ func (s *Server) removeImage(ctx context.Context, imageRef string) (untagErr err
 
 		if err := s.ContainerServer.StorageImageServer().DeleteImage(s.config.SystemContext, *id); err != nil {
 			if errors.Is(err, storagetypes.ErrImageUnknown) {
+				// imageRef matched the FORMAT of a full image ID but no
+				// image actually has that ID — it may really be a manifest
+				// digest's hex portion instead (same shape, different
+				// value; see FindLocallyStoredImageMatchingDigest's doc
+				// comment). Try that before treating this as "already
+				// removed."
+				if digestID, derr := s.ContainerServer.StorageImageServer().FindLocallyStoredImageMatchingDigest(imageRef); derr == nil && digestID != nil {
+					if err := s.ContainerServer.StorageImageServer().DeleteImage(s.config.SystemContext, *digestID); err != nil && !errors.Is(err, storagetypes.ErrImageUnknown) {
+						return fmt.Errorf("delete image: %w", err)
+					}
+				}
+
 				// The RemoveImage RPC is idempotent, and must not return an
 				// error if the image has already been removed. Ref:
 				// https://github.com/kubernetes/cri-api/blob/c20fa40/pkg/apis/runtime/v1/api.proto#L156-L157

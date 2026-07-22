@@ -1343,7 +1343,26 @@ func (s *Server) resolveAndVerifyContainerImage(ctx context.Context, ctr contain
 	if id := s.ContainerServer.StorageImageServer().HeuristicallyTryResolvingStringAsIDPrefix(userRequestedImage); id != nil {
 		imgResult, err = s.ContainerServer.StorageImageServer().ImageStatusByID(s.config.SystemContext, *id)
 		if err != nil {
-			return nil, err
+			// userRequestedImage matched the FORMAT of a full image ID (64
+			// hex chars) but no image actually has that ID. This happens in
+			// practice when Kubernetes passes the bare hex portion of a
+			// manifest DIGEST here (to pin exact content across tag
+			// mutations once a container has been resolved once) — that
+			// string has the identical hex shape as a real
+			// content-addressed image ID but is a different value by
+			// design. There is no name to fall back on here (unlike the
+			// candidate-matching branch below), so try resolving it as a
+			// digest instead — see FindLocallyStoredImageMatchingDigest's
+			// doc comment.
+			digestID, derr := s.ContainerServer.StorageImageServer().FindLocallyStoredImageMatchingDigest(userRequestedImage)
+			if derr != nil || digestID == nil {
+				return nil, err
+			}
+
+			imgResult, err = s.ContainerServer.StorageImageServer().ImageStatusByID(s.config.SystemContext, *digestID)
+			if err != nil {
+				return nil, err
+			}
 		}
 	} else {
 		potentialMatches, err := s.ContainerServer.StorageImageServer().CandidatesForPotentiallyShortImageName(s.config.SystemContext, userRequestedImage)
